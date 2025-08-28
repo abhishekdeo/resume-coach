@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment variables / secrets
+.env
+
+# VS Code settings
+.vscode/
+
+# Logs
+*.log
+
+# Optional: if using React frontend
+node_modules/
+build/
