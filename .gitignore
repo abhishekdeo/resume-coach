@@ -19,3 +19,5 @@ __pycache__/
 # Optional: if using React frontend
 node_modules/
 build/
+
+temp_sample_res.pdf
