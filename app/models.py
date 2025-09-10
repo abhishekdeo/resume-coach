@@ -2,8 +2,8 @@ from pydantic import BaseModel
 from typing import Optional
 
 class AnalyzeRequest(BaseModel):
-    resume: str
-    job_description: str
+    resume: Optional[str] = None  # Allow resume to be optional for PDF uploads
+    job_description: Optional[str] = None  # Allow job_description to be optional for flexibility
 
 class ResumeResponse(BaseModel):
     feedback: str
