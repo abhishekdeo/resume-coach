@@ -1,6 +1,6 @@
 from langchain_openai import ChatOpenAI
-from langchain_community.llms.sagemaker_endpoint import SagemakerEndpoint
-from langchain_community.llms.sagemaker_endpoint import ContentHandlerBase
+from langchain_aws.llms import SagemakerEndpoint
+from langchain_aws.llms.sagemaker_endpoint import LLMContentHandler
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.messages import HumanMessage, AIMessage
 import uuid
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 chat_sessions = {}
 
-class SageMakerContentHandler(ContentHandlerBase):
+class SageMakerContentHandler(LLMContentHandler):
     content_type = "application/json"
     accepts = "application/json"
 
@@ -25,8 +25,18 @@ class SageMakerContentHandler(ContentHandlerBase):
         return input_str.encode("utf-8")
 
     def transform_output(self, output: bytes) -> str:
-        response_json = json.loads(output.read().decode("utf-8"))
-        return response_json[0]["generated_text"]
+        try:
+            response_json = json.loads(output.read().decode("utf-8"))
+            logger.debug(f"SageMaker raw response: {response_json}")
+            if isinstance(response_json, list) and response_json:
+                return response_json[0].get("generated_text", "")
+            elif isinstance(response_json, dict):
+                return response_json.get("generated_text", response_json.get("text", ""))
+            else:
+                raise ValueError(f"Unexpected response format: {response_json}")
+        except Exception as e:
+            logger.error(f"Error parsing SageMaker response: {e}")
+            raise
 
 def get_llm(model_type: str):
     if model_type == "openai":
@@ -37,7 +47,7 @@ def get_llm(model_type: str):
         )
     elif model_type == "llama2":
         return SagemakerEndpoint(
-            endpoint_name="llama2-resume-coach",
+            endpoint_name="jumpstart-dft-meta-textgeneration-l-20250922-202635",
             region_name=os.getenv("AWS_REGION", "us-east-1"),
             model_kwargs={"max_new_tokens": 512, "temperature": 0.7},
             content_handler=SageMakerContentHandler()
@@ -81,7 +91,8 @@ def analyze_resume(resume: str, job_description: str, model_type: str = "openai"
         ("human", "Resume: {resume}\nJob Description: {job_description}")
     ])
     chain = prompt | llm
-    feedback = chain.invoke({"resume": resume, "job_description": job_description}).content
+    response = chain.invoke({"resume": resume, "job_description": job_description})
+    feedback = response.content if model_type == "openai" else response
     chat_sessions[session_id] = [HumanMessage(content=resume), AIMessage(content=feedback)]
     logger.debug(f"Session {session_id} created with history: {chat_sessions[session_id]}")
     return feedback, session_id
@@ -94,8 +105,9 @@ def continue_chat(session_id: str, message: str, model_type: str = "openai") -> 
     history = "\n".join([f"{msg.__class__.__name__}: {msg.content}" for msg in chat_sessions[session_id]])
     prompt = ChatPromptTemplate.from_template(chat_template)
     chain = prompt | llm
-    response = chain.invoke({"history": history or "No prior analysis available", "query": message}).content
-    chat_sessions[session_id].extend([HumanMessage(content=message), AIMessage(content=response)])
+    response = chain.invoke({"history": history or "No prior analysis available", "query": message})
+    feedback = response.content if model_type == "openai" else response
+    chat_sessions[session_id].extend([HumanMessage(content=message), AIMessage(content=feedback)])
     logger.debug(f"Session {session_id} history: {history}")
     logger.debug(f"Updated session {session_id}: {chat_sessions[session_id]}")
-    return response
+    return feedback
