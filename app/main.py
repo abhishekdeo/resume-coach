@@ -1,68 +1,97 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from app.services import analyze_resume, continue_chat
-from app.models import AnalyzeRequest, ResumeResponse, ChatRequest, ChatResponse
+from app.models import ResumeResponse, ChatRequest, ChatResponse
 import PyPDF2
 import io
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:5173'],  # Updated for frontend security
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=['*'],
-    allow_headers=['*']
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-@app.post('/analyze', response_model=ResumeResponse)
-async def analyze_endpoint(request: AnalyzeRequest = None, file: UploadFile = File(None), job_description: str = Form(None), job_file: UploadFile = File(None)):
-    if file and not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported for resume")
-    if job_file and not job_file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported for job description")
+async def preprocess_form_data(
+    resume_file: UploadFile = File(None),
+    resume_text: str = Form(None, min_length=0),
+    job_description: str = Form(None, min_length=0),
+    job_file: UploadFile = File(None),
+    model_type: str = Form("openai")
+):
+    logger.debug(f"Raw inputs - resume_file: {resume_file}, type: {type(resume_file)}")
+    logger.debug(f"Raw inputs - job_file: {job_file}, type: {type(job_file)}")
+    logger.debug(f"Raw inputs - resume_text: {resume_text}, job_description: {job_description}, model_type: {model_type}")
     
+    # Convert empty file inputs to None
+    resume_file = None if resume_file and not resume_file.filename else resume_file
+    job_file = None if job_file and not job_file.filename else job_file
+    
+    return {
+        "resume_file": resume_file,
+        "resume_text": resume_text,
+        "job_description": job_description,
+        "job_file": job_file,
+        "model_type": model_type
+    }
+
+@app.post("/analyze", response_model=ResumeResponse)
+async def analyze_endpoint(form_data: dict = Depends(preprocess_form_data)):
     try:
-        resume_text = ""
-        job_description_text = job_description or ""
-        
-        # Handle JSON payload (text-based resume and job description)
-        if request:
-            resume_text = request.resume if request.resume else ""
-            job_description_text = request.job_description if request.job_description else job_description_text
-        
-        # Handle resume PDF
-        if file:
-            contents = await file.read()
-            pdf_file = io.BytesIO(contents)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            resume_text = ""
+        resume_content = ""
+        job_description_content = form_data["job_description"] or ""
+
+        # Log processed form data
+        logger.debug(f"Processed form data: {form_data}")
+
+        # Handle resume input (PDF or string)
+        if form_data["resume_file"]:
+            if not form_data["resume_file"].filename.endswith(".pdf"):
+                raise HTTPException(status_code=400, detail="Resume must be a PDF file")
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(await form_data["resume_file"].read()))
             for page in pdf_reader.pages:
-                resume_text += page.extract_text() or ""
-            if not resume_text.strip():
-                raise HTTPException(status_code=400, detail="No text could be extracted from the resume PDF")
-        
-        # Handle job description PDF
-        if job_file:
-            contents = await job_file.read()
-            pdf_file = io.BytesIO(contents)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            job_description_text = ""
+                resume_content += page.extract_text() or ""
+        elif form_data["resume_text"] is not None and form_data["resume_text"].strip():
+            resume_content = form_data["resume_text"]
+        else:
+            raise HTTPException(status_code=400, detail="Resume (file or text) is required")
+
+        # Handle job description input (PDF or string)
+        if form_data["job_file"]:
+            if not form_data["job_file"].filename.endswith(".pdf"):
+                raise HTTPException(status_code=400, detail="Job description must be a PDF file")
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(await form_data["job_file"].read()))
             for page in pdf_reader.pages:
-                job_description_text += page.extract_text() or ""
-            if not job_description_text.strip():
-                raise HTTPException(status_code=400, detail="No text could be extracted from the job description PDF")
-        
-        # Validate inputs
-        if not resume_text or not job_description_text:
-            raise HTTPException(status_code=400, detail="Both resume and job description are required")
-        
-        feedback, session_id = analyze_resume(resume_text, job_description_text)
+                job_description_content += page.extract_text() or ""
+        elif form_data["job_description"] is not None and form_data["job_description"].strip():
+            job_description_content = form_data["job_description"]
+        else:
+            raise HTTPException(status_code=400, detail="Job description (file or text) is required")
+
+        if not resume_content.strip():
+            raise HTTPException(status_code=400, detail="Resume content is empty or unreadable")
+        if not job_description_content.strip():
+            raise HTTPException(status_code=400, detail="Job description content is empty or unreadable")
+
+        feedback, session_id = analyze_resume(resume_content, job_description_content, form_data["model_type"])
         return ResumeResponse(feedback=feedback, session_id=session_id)
     except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
-@app.post('/chat', response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
-    feedback = continue_chat(request.session_id, request.message)
-    return ChatResponse(feedback=feedback)
+@app.post("/chat", response_model=ChatResponse)
+async def chat_endpoint(request: ChatRequest, model_type: str = Query("openai")):
+    try:
+        feedback = continue_chat(request.session_id, request.message, model_type)
+        return ChatResponse(feedback=feedback)
+    except Exception as e:
+        logger.error(f"Error processing request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
